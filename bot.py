@@ -1,8 +1,6 @@
 import requests
 import json
 import os
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
@@ -86,22 +84,6 @@ def price_watcher():
     if alerts:
         send_telegram("\n\n".join(alerts))
 
-# 텔레그램 /recent_diff
-async def recent_diff(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        with open(LAST_FILE,"r") as f:
-            last_data = json.load(f)
-        message = "📊 마지막 조회 시점 업비트/빗썸 가격 차이\n\n"
-        for coin, data in last_data.items():
-            sign = "+" if data["diff_percent"] >= 0 else ""
-            message += f"{coin}: Upbit {data['upbit']} KRW / Bithumb {data['bithumb']} KRW ({sign}{data['diff_percent']:.2f}%)\n"
-        await update.message.reply_text(message)
-    except:
-        await update.message.reply_text("마지막 조회 데이터가 없습니다.")
-
+# GitHub Actions용: 1회 실행 후 종료
 if __name__ == "__main__":
-    price_watcher()  # GitHub Actions 실행 시 시세 감시
-    # 텔레그램 봇
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("recent_diff", recent_diff))
-    app.run_polling()
+    price_watcher()
