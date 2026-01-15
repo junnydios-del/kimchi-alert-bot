@@ -1,97 +1,112 @@
 import requests
-import os
 import json
-from datetime import datetime, timedelta
+import os
+from telegram import Update
+from telegram.ext import Updater, CommandHandler, CallbackContext
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-# ===== 설정 =====
-THRESHOLD = 2.0  # % 차이 기준
+# 감시 코인 목록
 COINS = [
-    "SAFE","BOUNTY","MTL","BREV","GLM","ZK","DOT","OP","CHZ","AVNT",
-    "PUMP","AKT","MON","MEW","XAUT","LSK","DEEP","APT","ORBS","MINA",
-    "WET","ZIL","RENDER","PLUME","CKB","FLOCK","SOPH","ME","POLYX","OG",
-    "AAVE","ONT","BERA","SAHARA","MASK","CTC","COW","ARKM","F",
-    "ARK","ANIME","WAL","HYPER","ATH","CARV","TIA","KNC","STORJ","ELF"
+    {"name":"세이프","symbol":"SAFE"}, {"name":"체인바운티","symbol":"BOUNTY"},
+    {"name":"10 메탈","symbol":"MTL"}, {"name":"브레비스","symbol":"BREV"},
+    {"name":"카이토","symbol":"KAITO"}, {"name":"골렘","symbol":"GLM"},
+    {"name":"지케이싱크","symbol":"ZK"}, {"name":"폴카닷","symbol":"DOT"},
+    {"name":"옵티미즘","symbol":"OP"}, {"name":"칠리즈","symbol":"CHZ"},
+    {"name":"아반티스","symbol":"AVNT"}, {"name":"펌프닷펀","symbol":"PUMP"},
+    {"name":"아카시 네트워크","symbol":"AKT"}, {"name":"모나드","symbol":"MON"},
+    {"name":"캣인어독스월드","symbol":"MEW"}, {"name":"테더 골드","symbol":"XAUT"},
+    {"name":"리스크","symbol":"LSK"}, {"name":"딥북","symbol":"DEEP"},
+    {"name":"앱토스","symbol":"APT"}, {"name":"오브스","symbol":"ORBS"},
+    {"name":"미나","symbol":"MINA"}, {"name":"휴미디파이","symbol":"WET"},
+    {"name":"질리카","symbol":"ZIL"}, {"name":"렌더토큰","symbol":"RENDER"},
+    {"name":"플룸","symbol":"PLUME"}, {"name":"너보스","symbol":"CKB"},
+    {"name":"플록","symbol":"FLOCK"}, {"name":"소폰","symbol":"SOPH"},
+    {"name":"매직 에덴","symbol":"ME"}, {"name":"폴리매쉬","symbol":"POLYX"},
+    {"name":"제로지","symbol":"OG"}, {"name":"에이브","symbol":"AAVE"},
+    {"name":"온톨로지","symbol":"ONT"}, {"name":"베라체인","symbol":"BERA"},
+    {"name":"사하라에이아이","symbol":"SAHARA"}, {"name":"마스크네트워크","symbol":"MASK"},
+    {"name":"크레딧코인","symbol":"CTC"}, {"name":"카우 프로토콜","symbol":"COW"},
+    {"name":"아캄","symbol":"ARKM"}, {"name":"신퓨처스","symbol":"F"},
+    {"name":"아크","symbol":"ARK"}, {"name":"애니메코인","symbol":"ANIME"},
+    {"name":"월러스","symbol":"WAL"}, {"name":"하이퍼레인","symbol":"HYPER"},
+    {"name":"에이셔","symbol":"ATH"}, {"name":"카브","symbol":"CARV"},
+    {"name":"셀레스티아","symbol":"TIA"}, {"name":"카이버 네트워크","symbol":"KNC"},
+    {"name":"스토리지","symbol":"STORJ"}, {"name":"엘프","symbol":"ELF"}
 ]
 
-ALERT_FILE = "last_alert.json"
-ALERT_COOLDOWN = timedelta(minutes=30)  # 같은 코인 30분 중복 방지
-# =================
+LAST_FILE = "last_diff.json"
+ALERTED_FILE = "alerted.json"
 
-def send_telegram(msg):
+def get_upbit_price(symbol):
+    try:
+        res = requests.get(f"https://api.upbit.com/v1/ticker?markets=KRW-{symbol}", timeout=10)
+        return res.json()[0]["trade_price"]
+    except:
+        return None
+
+def get_bithumb_price(symbol):
+    try:
+        res = requests.get(f"https://api.bithumb.com/public/ticker/{symbol}_KRW", timeout=10)
+        return float(res.json()["data"]["closing_price"])
+    except:
+        return None
+
+def send_telegram(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+    requests.post(url, json={"chat_id": CHAT_ID, "text": message})
 
-def load_last_alert():
-    if not os.path.exists(ALERT_FILE):
-        return {}
-    with open(ALERT_FILE, "r") as f:
-        return json.load(f)
+def price_watcher():
+    last_diff = {}
+    alerts = []
 
-def save_last_alert(data):
-    with open(ALERT_FILE, "w") as f:
-        json.dump(data, f)
-
-def get_bithumb_prices():
-    url = "https://api.bithumb.com/public/ticker/ALL_KRW"
-    data = requests.get(url, timeout=10).json()["data"]
-    return {k: float(v["closing_price"]) for k, v in data.items() if k != "date"}
-
-def get_upbit_prices():
-    markets = requests.get("https://api.upbit.com/v1/market/all").json()
-    krw_markets = {m["market"].split("-")[1]: m["market"]
-                   for m in markets if m["market"].startswith("KRW-")}
-
-    prices = {}
-    for coin, market in krw_markets.items():
-        ticker = requests.get(
-            "https://api.upbit.com/v1/ticker",
-            params={"markets": market},
-            timeout=10
-        ).json()
-        if ticker:
-            prices[coin] = float(ticker[0]["trade_price"])
-    return prices
-
-def main():
-    bithumb = get_bithumb_prices()
-    upbit = get_upbit_prices()
-
-    last_alert = load_last_alert()
-    now = datetime.utcnow()
+    # 이전 알림 기록 불러오기
+    try:
+        with open(ALERTED_FILE,"r") as f:
+            alerted = json.load(f)
+    except:
+        alerted = {}
 
     for coin in COINS:
-        if coin not in bithumb or coin not in upbit:
+        upbit = get_upbit_price(coin["symbol"])
+        bithumb = get_bithumb_price(coin["symbol"])
+        if upbit is None or bithumb is None:
             continue
+        diff = (bithumb - upbit) / upbit * 100
+        last_diff[coin["symbol"]] = {"upbit": upbit, "bithumb": bithumb, "diff_percent": diff}
 
-        b_price = bithumb[coin]
-        u_price = upbit[coin]
+        # 2% 이상 차이 + 이전 알림과 달라야 전송
+        if abs(diff) >= 2 and alerted.get(coin["symbol"]) != round(diff,2):
+            alerts.append(f"📌 {coin['name']} ({coin['symbol']})\nUpbit: {upbit} KRW\nBithumb: {bithumb} KRW\n차이: {diff:+.2f}%")
+            alerted[coin["symbol"]] = round(diff,2)
 
-        diff_percent = abs(b_price - u_price) / min(b_price, u_price) * 100
+    # JSON 파일 저장
+    with open(LAST_FILE,"w") as f:
+        json.dump(last_diff,f)
+    with open(ALERTED_FILE,"w") as f:
+        json.dump(alerted,f)
 
-        if diff_percent >= THRESHOLD:
-            last_time = last_alert.get(coin)
-            if last_time:
-                last_time = datetime.fromisoformat(last_time)
-                if now - last_time < ALERT_COOLDOWN:
-                    continue  # 중복 알림 차단
+    if alerts:
+        send_telegram("\n\n".join(alerts))
 
-            direction = "빗썸 > 업비트" if b_price > u_price else "업비트 > 빗썸"
-
-            msg = (
-                f"🚨 가격 차이 발생\n"
-                f"코인: {coin}\n"
-                f"차이: {diff_percent:.2f}%\n"
-                f"{direction}\n"
-                f"빗썸: {b_price:,.0f}원\n"
-                f"업비트: {u_price:,.0f}원"
-            )
-            send_telegram(msg)
-            last_alert[coin] = now.isoformat()
-
-    save_last_alert(last_alert)
+# /recent_diff 명령어
+def recent_diff(update: Update, context: CallbackContext):
+    try:
+        with open(LAST_FILE,"r") as f:
+            last_data = json.load(f)
+        message = "📊 마지막 조회 시점 업비트/빗썸 가격 차이\n\n"
+        for coin, data in last_data.items():
+            sign = "+" if data["diff_percent"] >= 0 else ""
+            message += f"{coin}: Upbit {data['upbit']} KRW / Bithumb {data['bithumb']} KRW ({sign}{data['diff_percent']:.2f}%)\n"
+        update.message.reply_text(message)
+    except:
+        update.message.reply_text("마지막 조회 데이터가 없습니다.")
 
 if __name__ == "__main__":
-    main()
+    updater = Updater(BOT_TOKEN)
+    dispatcher = updater.dispatcher
+    dispatcher.add_handler(CommandHandler("recent_diff", recent_diff))
+
+    # GitHub Actions에서 실행 시 시세 감시
+    price_watcher()
