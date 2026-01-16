@@ -8,7 +8,6 @@ import requests
 # ===============================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-
 DIFF_THRESHOLD = 2.0  # % 차이 기준
 
 
@@ -32,13 +31,11 @@ def update_common_coins():
 
     common = sorted(list(get_upbit() & get_bithumb()))
 
-    data = {
-        "date": datetime.date.today().isoformat(),
-        "coins": common
-    }
-
     with open("common_coins.json", "w") as f:
-        json.dump(data, f)
+        json.dump({
+            "date": datetime.date.today().isoformat(),
+            "coins": common
+        }, f)
 
     print(f"[INFO] 공통 코인 {len(common)}개 갱신 완료")
 
@@ -52,7 +49,7 @@ def load_common_coins():
     with open("common_coins.json", "r") as f:
         data = json.load(f)
 
-    if data.get("date") != today:
+    if data["date"] != today:
         update_common_coins()
         with open("common_coins.json", "r") as f:
             data = json.load(f)
@@ -65,8 +62,7 @@ def load_common_coins():
 # ===============================
 def get_upbit_price(symbol):
     url = "https://api.upbit.com/v1/ticker"
-    params = {"markets": f"KRW-{symbol}"}
-    res = requests.get(url, params=params, timeout=10).json()
+    res = requests.get(url, params={"markets": f"KRW-{symbol}"}, timeout=10).json()
     return float(res[0]["trade_price"])
 
 
@@ -77,15 +73,37 @@ def get_bithumb_price(symbol):
 
 
 # ===============================
+# 입출금 상태 확인 (업비트 기준)
+# ===============================
+def get_coin_status(symbol):
+    url = "https://api.upbit.com/v1/status/wallet"
+    res = requests.get(url, timeout=10).json()
+
+    for coin in res:
+        if coin.get("currency") == symbol:
+            return {
+                "deposit_status": coin.get("deposit_state"),
+                "withdraw_status": coin.get("withdraw_state")
+            }
+    return None
+
+
+def is_transfer_available(info):
+    return (
+        info.get("deposit_status") == "ACTIVE"
+        and info.get("withdraw_status") == "ACTIVE"
+    )
+
+
+# ===============================
 # 텔레그램 전송
 # ===============================
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    data = {
+    requests.post(url, data={
         "chat_id": CHAT_ID,
         "text": message
-    }
-    requests.post(url, data=data, timeout=10)
+    }, timeout=10)
 
 
 # ===============================
@@ -97,6 +115,10 @@ def price_watcher():
 
     for symbol in coins:
         try:
+            coin_info = get_coin_status(symbol)
+            if not coin_info or not is_transfer_available(coin_info):
+                continue
+
             up = get_upbit_price(symbol)
             bt = get_bithumb_price(symbol)
 
@@ -114,14 +136,13 @@ def price_watcher():
             print(f"[SKIP] {symbol} 오류: {e}")
 
     if alerts:
-        message = "🚨 가격 차이 알림 🚨\n\n" + "\n\n".join(alerts)
-        send_telegram(message)
+        send_telegram("🚨 가격 차이 알림 🚨\n\n" + "\n\n".join(alerts))
     else:
         print("[INFO] 조건 만족 코인 없음")
 
 
 # ===============================
-# 실행 지점 (절대 위치 중요)
+# 실행 지점 (절대 위치)
 # ===============================
 if __name__ == "__main__":
     price_watcher()
