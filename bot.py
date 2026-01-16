@@ -60,5 +60,6 @@ def price_watcher():
     if alerts:
         bot.send_message(chat_id=CHAT_ID, text="\n\n".join(alerts))
 
-   if __name__ == "__main__":
+
+if __name__ == "__main__":
     price_watcher()
