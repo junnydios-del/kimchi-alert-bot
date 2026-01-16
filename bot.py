@@ -44,7 +44,7 @@ def update_tradable_coins():
             c["deposit_state"] == "ACTIVE" and
             c["withdraw_state"] == "ACTIVE"
         )
-        for c in wallet
+        for c in wallet_data
     }
 
     tradable = sorted([
