@@ -21,28 +21,33 @@ def update_tradable_coins():
     upbit = requests.get(
         "https://api.upbit.com/v1/market/all", timeout=10
     ).json()
+
     upbit_coins = {
         m["market"].replace("KRW-", "")
-        for m in upbit if m["market"].startswith("KRW-")
+        for m in upbit
+        if m["market"].startswith("KRW-")
     }
 
     # 빗썸 KRW
     bithumb = requests.get(
         "https://api.bithumb.com/public/ticker/ALL_KRW", timeout=10
     ).json()
+
     bithumb_coins = set(bithumb["data"].keys()) - {"date"}
 
     common = upbit_coins & bithumb_coins
 
-    # 업비트 지갑 상태
+    # ✅ 업비트 지갑 상태 (중요)
     wallet = requests.get(
         "https://api.upbit.com/v1/status/wallet", timeout=10
     ).json()
 
+    wallet_data = wallet.get("data", [])   # ← 이 줄이 반드시 있어야 함
+
     wallet_map = {
-        c["currency"]: (
-            c["deposit_state"] == "ACTIVE" and
-            c["withdraw_state"] == "ACTIVE"
+        c.get("currency"): (
+            c.get("deposit_state") == "ACTIVE" and
+            c.get("withdraw_state") == "ACTIVE"
         )
         for c in wallet_data
     }
@@ -51,7 +56,7 @@ def update_tradable_coins():
         c for c in common if wallet_map.get(c)
     ])
 
-    with open(COMMON_FILE, "w") as f:
+    with open("tradable_coins.json", "w") as f:
         json.dump({
             "date": datetime.date.today().isoformat(),
             "coins": tradable
