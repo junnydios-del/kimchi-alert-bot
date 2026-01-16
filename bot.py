@@ -8,50 +8,70 @@ import requests
 # ===============================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-DIFF_THRESHOLD = 2.0  # % 차이 기준
+
+DIFF_THRESHOLD = 1.5  # % 차이 기준
+COMMON_FILE = "tradable_coins.json"
 
 
 # ===============================
-# 공통 코인 하루 1회 갱신
+# 공통 + 입출금 가능 코인 하루 1회 생성
 # ===============================
-def update_common_coins():
-    def get_upbit():
-        url = "https://api.upbit.com/v1/market/all"
-        res = requests.get(url, timeout=10).json()
-        return {
-            m["market"].replace("KRW-", "")
-            for m in res
-            if m["market"].startswith("KRW-")
-        }
+def update_tradable_coins():
+    # 업비트 KRW
+    upbit = requests.get(
+        "https://api.upbit.com/v1/market/all", timeout=10
+    ).json()
+    upbit_coins = {
+        m["market"].replace("KRW-", "")
+        for m in upbit if m["market"].startswith("KRW-")
+    }
 
-    def get_bithumb():
-        url = "https://api.bithumb.com/public/ticker/ALL_KRW"
-        res = requests.get(url, timeout=10).json()
-        return set(res["data"].keys()) - {"date"}
+    # 빗썸 KRW
+    bithumb = requests.get(
+        "https://api.bithumb.com/public/ticker/ALL_KRW", timeout=10
+    ).json()
+    bithumb_coins = set(bithumb["data"].keys()) - {"date"}
 
-    common = sorted(list(get_upbit() & get_bithumb()))
+    common = upbit_coins & bithumb_coins
 
-    with open("common_coins.json", "w") as f:
+    # 업비트 지갑 상태
+    wallet = requests.get(
+        "https://api.upbit.com/v1/status/wallet", timeout=10
+    ).json()
+
+    wallet_map = {
+        c["currency"]: (
+            c["deposit_state"] == "ACTIVE" and
+            c["withdraw_state"] == "ACTIVE"
+        )
+        for c in wallet
+    }
+
+    tradable = sorted([
+        c for c in common if wallet_map.get(c)
+    ])
+
+    with open(COMMON_FILE, "w") as f:
         json.dump({
             "date": datetime.date.today().isoformat(),
-            "coins": common
+            "coins": tradable
         }, f)
 
-    print(f"[INFO] 공통 코인 {len(common)}개 갱신 완료")
+    print(f"[INFO] 입출금 가능 공통 코인 {len(tradable)}개 저장")
 
 
-def load_common_coins():
+def load_tradable_coins():
     today = datetime.date.today().isoformat()
 
-    if not os.path.exists("common_coins.json"):
-        update_common_coins()
+    if not os.path.exists(COMMON_FILE):
+        update_tradable_coins()
 
-    with open("common_coins.json", "r") as f:
+    with open(COMMON_FILE, "r") as f:
         data = json.load(f)
 
     if data["date"] != today:
-        update_common_coins()
-        with open("common_coins.json", "r") as f:
+        update_tradable_coins()
+        with open(COMMON_FILE, "r") as f:
             data = json.load(f)
 
     return data["coins"]
@@ -61,64 +81,42 @@ def load_common_coins():
 # 가격 조회
 # ===============================
 def get_upbit_price(symbol):
-    url = "https://api.upbit.com/v1/ticker"
-    res = requests.get(url, params={"markets": f"KRW-{symbol}"}, timeout=10).json()
-    return float(res[0]["trade_price"])
+    r = requests.get(
+        "https://api.upbit.com/v1/ticker",
+        params={"markets": f"KRW-{symbol}"},
+        timeout=10
+    ).json()
+    return float(r[0]["trade_price"])
 
 
 def get_bithumb_price(symbol):
-    url = f"https://api.bithumb.com/public/ticker/{symbol}_KRW"
-    res = requests.get(url, timeout=10).json()
-    return float(res["data"]["closing_price"])
+    r = requests.get(
+        f"https://api.bithumb.com/public/ticker/{symbol}_KRW",
+        timeout=10
+    ).json()
+    return float(r["data"]["closing_price"])
 
 
 # ===============================
-# 입출금 상태 확인 (업비트 기준)
+# 텔레그램
 # ===============================
-def get_coin_status(symbol):
-    url = "https://api.upbit.com/v1/status/wallet"
-    res = requests.get(url, timeout=10).json()
-
-    for coin in res:
-        if coin.get("currency") == symbol:
-            return {
-                "deposit_status": coin.get("deposit_state"),
-                "withdraw_status": coin.get("withdraw_state")
-            }
-    return None
-
-
-def is_transfer_available(info):
-    return (
-        info.get("deposit_status") == "ACTIVE"
-        and info.get("withdraw_status") == "ACTIVE"
+def send_telegram(msg):
+    requests.post(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+        data={"chat_id": CHAT_ID, "text": msg},
+        timeout=10
     )
 
 
 # ===============================
-# 텔레그램 전송
-# ===============================
-def send_telegram(message):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.post(url, data={
-        "chat_id": CHAT_ID,
-        "text": message
-    }, timeout=10)
-
-
-# ===============================
-# 메인 감시 로직 (1회 실행)
+# 가격 감시 (5분마다 실행)
 # ===============================
 def price_watcher():
-    coins = load_common_coins()
+    coins = load_tradable_coins()
     alerts = []
 
     for symbol in coins:
         try:
-            coin_info = get_coin_status(symbol)
-            if not coin_info or not is_transfer_available(coin_info):
-                continue
-
             up = get_upbit_price(symbol)
             bt = get_bithumb_price(symbol)
 
@@ -131,18 +129,19 @@ def price_watcher():
                     f"빗썸: {bt:,.0f}원\n"
                     f"차이: {diff:.2f}%"
                 )
-
         except Exception as e:
-            print(f"[SKIP] {symbol} 오류: {e}")
+            print(f"[SKIP] {symbol}: {e}")
 
     if alerts:
-        send_telegram("🚨 가격 차이 알림 🚨\n\n" + "\n\n".join(alerts))
+        send_telegram(
+            "🚨 가격 차이 알림 🚨\n\n" + "\n\n".join(alerts)
+        )
     else:
-        print("[INFO] 조건 만족 코인 없음")
+        print("[INFO] 조건 만족 없음")
 
 
 # ===============================
-# 실행 지점 (절대 위치)
+# 실행
 # ===============================
 if __name__ == "__main__":
     price_watcher()
