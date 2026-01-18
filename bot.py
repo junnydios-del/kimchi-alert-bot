@@ -1,218 +1,153 @@
-import os
-import json
-import datetime
 import requests
+import json
+import os
+import sys
+import time
+from datetime import datetime, timedelta
 
-# ===============================
+# ======================
 # 설정
-# ===============================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+# ======================
+UPBIT_URL = "https://api.upbit.com/v1/ticker"
+BINANCE_URL = "https://api.binance.com/api/v3/ticker/price"
 
-DIFF_THRESHOLD = 1.5  # % 차이 기준
-COMMON_FILE = "tradable_coins.json"
+COMMON_FILE = "common_coins.json"
+EXCLUDED_FILE = "excluded_coins.json"
+COOLDOWN_FILE = "cooldown.json"
 
+AUTO_THRESHOLD = 1.5
+MANUAL_THRESHOLD = 0.5
+COOLDOWN_HOURS = 3
 
-# ===============================
-# 공통 + 입출금 가능 코인 하루 1회 생성
-# ===============================
-def update_tradable_coins():
-    # 업비트 KRW
-    upbit = requests.get(
-        "https://api.upbit.com/v1/market/all", timeout=10
-    ).json()
-
-    upbit_coins = {
-        m["market"].replace("KRW-", "")
-        for m in upbit
-        if m["market"].startswith("KRW-")
-    }
-
-    # 빗썸 KRW
-    bithumb = requests.get(
-        "https://api.bithumb.com/public/ticker/ALL_KRW", timeout=10
-    ).json()
-
-    bithumb_coins = set(bithumb["data"].keys()) - {"date"}
-
-    common = upbit_coins & bithumb_coins
-
-    # ✅ 업비트 지갑 상태 (중요)
-    wallet = requests.get(
-        "https://api.upbit.com/v1/status/wallet", timeout=10
-    ).json()
-
-    wallet_data = wallet.get("data", [])   # ← 이 줄이 반드시 있어야 함
-
-    wallet_map = {
-        c.get("currency"): (
-            c.get("deposit_state") == "ACTIVE" and
-            c.get("withdraw_state") == "ACTIVE"
-        )
-        for c in wallet_data
-    }
-
-    tradable = sorted([
-        c for c in common if wallet_map.get(c)
-    ])
-
-    with open("tradable_coins.json", "w") as f:
-        json.dump({
-            "date": datetime.date.today().isoformat(),
-            "coins": tradable
-        }, f)
-
-    print(f"[INFO] 입출금 가능 공통 코인 {len(tradable)}개 저장")
+TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 
-def load_tradable_coins():
-    today = datetime.date.today().isoformat()
-
-    if not os.path.exists(COMMON_FILE):
-        update_tradable_coins()
-
-    with open(COMMON_FILE, "r") as f:
-        data = json.load(f)
-
-    if data["date"] != today:
-        update_tradable_coins()
-        with open(COMMON_FILE, "r") as f:
-            data = json.load(f)
-
-    return data["coins"]
-
-
-# ===============================
-# 가격 조회
-# ===============================
-def get_upbit_price(symbol):
-    r = requests.get(
-        "https://api.upbit.com/v1/ticker",
-        params={"markets": f"KRW-{symbol}"},
-        timeout=10
-    ).json()
-    return float(r[0]["trade_price"])
-
-
-def get_bithumb_price(symbol):
-    r = requests.get(
-        f"https://api.bithumb.com/public/ticker/{symbol}_KRW",
-        timeout=10
-    ).json()
-    return float(r["data"]["closing_price"])
-
-
-# ===============================
-# 텔레그램
-# ===============================
+# ======================
+# 유틸
+# ======================
 def send_telegram(msg):
-    requests.post(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-        data={"chat_id": CHAT_ID, "text": msg},
-        timeout=10
-    )
-
-
-# ===============================
-# 가격 감시 (5분마다 실행)
-# ===============================
-def price_watcher():
-    command = load_command()
-
-    if command == "query":
-        send_query_result()
-        clear_command()
+    if not TG_TOKEN or not TG_CHAT_ID:
+        print("❌ 텔레그램 설정 없음")
         return
-
-def price_watcher():
-    coins = load_tradable_coins()
-    alerts = []
-
-    for symbol in coins:
-        try:
-            up = get_upbit_price(symbol)
-            bt = get_bithumb_price(symbol)
-
-            diff = ((up - bt) / bt) * 100
-
-            if abs(diff) >= DIFF_THRESHOLD:
-                alerts.append(
-                    f"{symbol}\n"
-                    f"업비트: {up:,.0f}원\n"
-                    f"빗썸: {bt:,.0f}원\n"
-                    f"차이: {diff:.2f}%"
-                )
-        except Exception as e:
-            print(f"[SKIP] {symbol}: {e}")
-
-    if alerts:
-        send_telegram(
-            "🚨 가격 차이 알림 🚨\n\n" + "\n\n".join(alerts)
-        )
-    else:
-        print("[INFO] 조건 만족 없음")
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+    requests.post(url, json={"chat_id": TG_CHAT_ID, "text": msg})
 
 
-# ===============================
-# 실행
-# ===============================
-if __name__ == "__main__":
-    price_watcher()
+def load_json(path, default):
+    if not os.path.exists(path):
+        return default
+    with open(path, "r") as f:
+        return json.load(f)
 
 
-def load_command():
-    if not os.path.exists("command.json"):
-        return None
-
-    with open("command.json", "r") as f:
-        data = json.load(f)
-
-    return data.get("command")
+def save_json(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
 
 
-def clear_command():
-    with open("command.json", "w") as f:
-        json.dump({"command": None}, f)
+# ======================
+# 가격 수집
+# ======================
+def get_upbit_prices():
+    markets = requests.get("https://api.upbit.com/v1/market/all").json()
+    markets = [m["market"] for m in markets if m["market"].startswith("KRW-")]
+
+    prices = {}
+    for i in range(0, len(markets), 100):
+        chunk = markets[i:i+100]
+        res = requests.get(UPBIT_URL, params={"markets": ",".join(chunk)}).json()
+        for r in res:
+            prices[r["market"].replace("KRW-", "")] = r["trade_price"]
+    return prices
 
 
-def get_all_diffs():
-    coins = load_common_coins()
-    diffs = []
+def get_binance_prices():
+    res = requests.get(BINANCE_URL).json()
+    prices = {}
+    for r in res:
+        if r["symbol"].endswith("USDT"):
+            prices[r["symbol"].replace("USDT", "")] = float(r["price"])
+    return prices
 
-    for symbol in coins:
-        try:
-            up = get_upbit_price(symbol)
-            bt = get_bithumb_price(symbol)
 
-            diff = ((up - bt) / bt) * 100
-            diffs.append((symbol, diff))
+# ======================
+# 공통 코인 생성 (수동)
+# ======================
+def generate_common_coins():
+    upbit = get_upbit_prices()
+    binance = get_binance_prices()
+    common = sorted(set(upbit.keys()) & set(binance.keys()))
+    save_json(COMMON_FILE, common)
+    send_telegram(f"✅ 공통 코인 {len(common)}개 생성 완료")
 
-        except:
+
+# ======================
+# 비교 로직
+# ======================
+def compare(mode="auto"):
+    common = load_json(COMMON_FILE, [])
+    excluded = load_json(EXCLUDED_FILE, [])
+    cooldown = load_json(COOLDOWN_FILE, {})
+
+    threshold = AUTO_THRESHOLD if mode == "auto" else MANUAL_THRESHOLD
+    now = datetime.utcnow()
+
+    upbit = get_upbit_prices()
+    binance = get_binance_prices()
+
+    messages = []
+
+    for coin in common:
+        if coin in excluded:
+            continue
+        if coin not in upbit or coin not in binance:
             continue
 
-    return diffs
+        price_up = upbit[coin]
+        price_bn = binance[coin] * 1300  # 대략 환율
 
-def send_query_result():
-    diffs = get_all_diffs()
+        diff = ((price_up - price_bn) / price_bn) * 100
 
-    if not diffs:
-        send_telegram("조회 실패")
-        return
+        if abs(diff) < threshold:
+            continue
 
-    diffs.sort(key=lambda x: x[1], reverse=True)
+        # 쿨타임 체크 (자동만)
+        if mode == "auto":
+            last = cooldown.get(coin)
+            if last:
+                last_time = datetime.fromisoformat(last)
+                if now - last_time < timedelta(hours=COOLDOWN_HOURS):
+                    continue
+            cooldown[coin] = now.isoformat()
 
-    top10 = diffs[:10]
-    bottom10 = diffs[-10:][::-1]
+        messages.append(
+            f"{coin}\n업비트: {price_up:,.0f}\n바이낸스: {price_bn:,.0f}\n차이: {diff:.2f}%"
+        )
 
-    msg = "📊 업비트 ↔ 빗썸 가격차이\n\n"
+    if messages:
+        send_telegram(f"📊 {mode.upper()} 조회 결과\n\n" + "\n\n".join(messages))
+    else:
+        print("ℹ️ 조건 충족 코인 없음")
 
-    msg += "📈 상위 10\n"
-    for s, d in top10:
-        msg += f"{s}: {d:.2f}%\n"
+    save_json(COOLDOWN_FILE, cooldown)
 
-    msg += "\n📉 하위 10\n"
-    for s, d in bottom10:
-        msg += f"{s}: {d:.2f}%\n"
 
-    send_telegram(msg)
+# ======================
+# 실행 분기
+# ======================
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("사용법: python bot.py [init|manual|auto]")
+        sys.exit(1)
 
+    cmd = sys.argv[1]
+
+    if cmd == "init":
+        generate_common_coins()
+    elif cmd == "manual":
+        compare("manual")
+    elif cmd == "auto":
+        compare("auto")
+    else:
+        print("❌ 알 수 없는 명령어")
