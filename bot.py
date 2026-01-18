@@ -150,3 +150,61 @@ def price_watcher():
 # ===============================
 if __name__ == "__main__":
     price_watcher()
+
+
+def load_command():
+    if not os.path.exists("command.json"):
+        return None
+
+    with open("command.json", "r") as f:
+        data = json.load(f)
+
+    return data.get("command")
+
+
+def clear_command():
+    with open("command.json", "w") as f:
+        json.dump({"command": None}, f)
+
+
+def get_all_diffs():
+    coins = load_common_coins()
+    diffs = []
+
+    for symbol in coins:
+        try:
+            up = get_upbit_price(symbol)
+            bt = get_bithumb_price(symbol)
+
+            diff = ((up - bt) / bt) * 100
+            diffs.append((symbol, diff))
+
+        except:
+            continue
+
+    return diffs
+
+def send_query_result():
+    diffs = get_all_diffs()
+
+    if not diffs:
+        send_telegram("조회 실패")
+        return
+
+    diffs.sort(key=lambda x: x[1], reverse=True)
+
+    top10 = diffs[:10]
+    bottom10 = diffs[-10:][::-1]
+
+    msg = "📊 업비트 ↔ 빗썸 가격차이\n\n"
+
+    msg += "📈 상위 10\n"
+    for s, d in top10:
+        msg += f"{s}: {d:.2f}%\n"
+
+    msg += "\n📉 하위 10\n"
+    for s, d in bottom10:
+        msg += f"{s}: {d:.2f}%\n"
+
+    send_telegram(msg)
+
