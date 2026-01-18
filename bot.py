@@ -117,6 +117,14 @@ def send_telegram(msg):
 # 가격 감시 (5분마다 실행)
 # ===============================
 def price_watcher():
+    command = load_command()
+
+    if command == "query":
+        send_query_result()
+        clear_command()
+        return
+
+def price_watcher():
     coins = load_tradable_coins()
     alerts = []
 
