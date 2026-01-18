@@ -1,0 +1,4 @@
+python bot.py init
+git add common_coins.json
+git commit -m "Add common coins list"
+git push
