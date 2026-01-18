@@ -1,161 +1,194 @@
-import os
-import json
-import datetime
 import requests
+import json
+import os
+import sys
+import time
+from datetime import datetime, timedelta
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+# =====================
+# 설정값
+# =====================
+UPBIT_URL = "https://api.upbit.com/v1/ticker"
+BITHUMB_URL = "https://api.bithumb.com/public/ticker/ALL_KRW"
 
-COMMON_FILE = "common_coins.json"
-AUTO_DIFF = 1.5   # 자동 알림 기준 %
-MANUAL_DIFF = 0.5 # 수동 조회 표시 기준 %
+COMMON_COINS_FILE = "common_coins.json"
+LAST_ALERT_FILE = "last_alert.json"
+
+MANUAL_THRESHOLD = 0.5   # %
+AUTO_THRESHOLD = 1.5     # %
+ALERT_COOLDOWN_HOURS = 3
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 
-# ===============================
-# 공통 코인 생성 (수동 실행)
-# ===============================
+# =====================
+# 유틸
+# =====================
+def send_telegram(msg: str):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("[WARN] 텔레그램 토큰/아이디 없음")
+        return
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    requests.post(url, data={
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": msg
+    })
+
+
+def load_common_coins():
+    if not os.path.exists(COMMON_COINS_FILE):
+        raise Exception(
+            "common_coins.json 없음.\n"
+            "로컬에서 python bot.py init 실행 후\n"
+            "git commit & push 하세요."
+        )
+    with open(COMMON_COINS_FILE, "r") as f:
+        return json.load(f)
+
+
+def load_last_alert():
+    if not os.path.exists(LAST_ALERT_FILE):
+        return {}
+    with open(LAST_ALERT_FILE, "r") as f:
+        return json.load(f)
+
+
+def save_last_alert(data):
+    with open(LAST_ALERT_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+# =====================
+# 시세 조회
+# =====================
+def get_upbit_prices(coins):
+    markets = [f"KRW-{c}" for c in coins]
+    r = requests.get(UPBIT_URL, params={"markets": ",".join(markets)}).json()
+
+    prices = {}
+    for item in r:
+        symbol = item["market"].replace("KRW-", "")
+        prices[symbol] = item["trade_price"]
+    return prices
+
+
+def get_bithumb_prices():
+    r = requests.get(BITHUMB_URL).json()
+    prices = {}
+    for symbol, data in r["data"].items():
+        if symbol == "date":
+            continue
+        prices[symbol] = float(data["closing_price"])
+    return prices
+
+
+# =====================
+# 공통 코인 생성 (로컬 전용)
+# =====================
 def generate_common_coins():
-    upbit = requests.get(
-        "https://api.upbit.com/v1/market/all", timeout=10
-    ).json()
-
+    upbit_markets = requests.get("https://api.upbit.com/v1/market/all").json()
     upbit_coins = {
         m["market"].replace("KRW-", "")
-        for m in upbit if m["market"].startswith("KRW-")
+        for m in upbit_markets
+        if m["market"].startswith("KRW-")
     }
 
-    bithumb = requests.get(
-        "https://api.bithumb.com/public/ticker/ALL_KRW", timeout=10
-    ).json()
+    bithumb = requests.get(BITHUMB_URL).json()["data"]
+    bithumb_coins = set(bithumb.keys()) - {"date"}
 
-    bithumb_coins = set(bithumb["data"].keys()) - {"date"}
+    common = sorted(list(upbit_coins & bithumb_coins))
 
-    common = sorted(upbit_coins & bithumb_coins)
-
-    with open(COMMON_FILE, "w") as f:
-        json.dump({
-            "date": datetime.date.today().isoformat(),
-            "coins": common
-        }, f)
+    with open(COMMON_COINS_FILE, "w") as f:
+        json.dump(common, f, indent=2)
 
     print(f"[INIT] 공통 코인 {len(common)}개 저장 완료")
 
 
-# ===============================
-# 로드
-# ===============================
-def load_common_coins():
-    if not os.path.exists(COMMON_FILE):
-        raise Exception("common_coins.json 없음. 먼저 수동 생성하세요.")
+# =====================
+# 비교 로직
+# =====================
+def compare_prices(threshold, send_alert=False):
+    coins = load_common_coins()
+    upbit = get_upbit_prices(coins)
+    bithumb = get_bithumb_prices()
 
-    with open(COMMON_FILE, "r") as f:
-        return json.load(f)["coins"]
+    last_alert = load_last_alert()
+    now = datetime.utcnow()
+
+    results = []
+
+    for c in coins:
+        if c not in upbit or c not in bithumb:
+            continue
+
+        u = upbit[c]
+        b = bithumb[c]
+
+        diff = (u - b) / b * 100
+        diff = round(diff, 2)
+
+        if abs(diff) < threshold:
+            continue
+
+        # 자동 알림 쿨타임 체크
+        if send_alert:
+            last_time_str = last_alert.get(c)
+            if last_time_str:
+                last_time = datetime.fromisoformat(last_time_str)
+                if now - last_time < timedelta(hours=ALERT_COOLDOWN_HOURS):
+                    continue
+
+        results.append((c, u, b, diff))
+
+        if send_alert:
+            msg = (
+                f"[김프 알림]\n"
+                f"{c}\n"
+                f"업비트: {u:,} KRW\n"
+                f"빗썸: {b:,} KRW\n"
+                f"차이: {diff}%"
+            )
+            send_telegram(msg)
+            last_alert[c] = now.isoformat()
+
+    if send_alert:
+        save_last_alert(last_alert)
+
+    return results
 
 
-# ===============================
-# 가격 조회
-# ===============================
-def get_upbit_price(symbol):
-    r = requests.get(
-        "https://api.upbit.com/v1/ticker",
-        params={"markets": f"KRW-{symbol}"},
-        timeout=10
-    ).json()
-    return float(r[0]["trade_price"])
-
-
-def get_bithumb_price(symbol):
-    r = requests.get(
-        f"https://api.bithumb.com/public/ticker/{symbol}_KRW",
-        timeout=10
-    ).json()
-    return float(r["data"]["closing_price"])
-
-
-# ===============================
-# 텔레그램
-# ===============================
-def send_telegram(msg):
-    requests.post(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-        data={"chat_id": CHAT_ID, "text": msg},
-        timeout=10
-    )
-
-
-# ===============================
-# 수동 조회
-# ===============================
+# =====================
+# 명령
+# =====================
 def manual_query():
-    coins = load_common_coins()
-    diffs = []
-
-    for c in coins:
-        try:
-            up = get_upbit_price(c)
-            bt = get_bithumb_price(c)
-            diff = ((up - bt) / bt) * 100
-            if abs(diff) >= MANUAL_DIFF:
-                diffs.append((c, diff))
-        except:
-            continue
-
-    if not diffs:
-        send_telegram("📊 조회 결과 없음")
-        return
-
-    diffs.sort(key=lambda x: x[1], reverse=True)
-
-    msg = "📊 업비트 ↔ 빗썸 가격차이\n\n"
-    msg += "📈 상위 10\n"
-    for s, d in diffs[:10]:
-        msg += f"{s}: {d:.2f}%\n"
-
-    msg += "\n📉 하위 10\n"
-    for s, d in diffs[-10:]:
-        msg += f"{s}: {d:.2f}%\n"
-
-    send_telegram(msg)
+    results = compare_prices(MANUAL_THRESHOLD, send_alert=True)
+    print(f"[MANUAL] 알림 {len(results)}건 전송")
 
 
-# ===============================
-# 자동 감시
-# ===============================
-def auto_watch():
-    coins = load_common_coins()
-    alerts = []
-
-    for c in coins:
-        try:
-            up = get_upbit_price(c)
-            bt = get_bithumb_price(c)
-            diff = ((up - bt) / bt) * 100
-            if abs(diff) >= AUTO_DIFF:
-                alerts.append(f"{c}: {diff:.2f}%")
-        except:
-            continue
-
-    if alerts:
-        send_telegram("🚨 가격 차이 알림\n\n" + "\n".join(alerts))
+def auto_monitor():
+    results = compare_prices(AUTO_THRESHOLD, send_alert=True)
+    print(f"[AUTO] 알림 {len(results)}건 전송")
 
 
-# ===============================
-# 실행
-# ===============================
+# =====================
+# 진입점
+# =====================
 if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) != 2:
-        print("사용법: python bot.py [init|manual|auto]")
-        exit(1)
+    if len(sys.argv) < 2:
+        print("사용법: python bot.py [manual|auto]")
+        sys.exit(1)
 
     cmd = sys.argv[1]
 
     if cmd == "init":
+        print("⚠️ init은 로컬에서만 사용하세요.")
         generate_common_coins()
     elif cmd == "manual":
         manual_query()
     elif cmd == "auto":
-        auto_watch()
+        auto_monitor()
     else:
-        print("사용법: python bot.py [init|manual|auto]")
+        print("사용법: python bot.py [manual|auto]")
+        sys.exit(1)
