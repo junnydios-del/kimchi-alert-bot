@@ -1,0 +1,21 @@
+name: run-query
+
+on:
+  workflow_dispatch:   # 수동 실행 버튼 생김
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Init common coins
+        run: python bot.py init
