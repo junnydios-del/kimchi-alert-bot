@@ -18,4 +18,4 @@ jobs:
         run: pip install requests
 
       - name: Init common coins
-        run: python bot.py init
+        run: python bot.py manual
