@@ -3,13 +3,13 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # =========================
-# 시크릿에서 가져오기
+# 환경변수
 # =========================
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-if not TELEGRAM_TOKEN or not CHAT_ID:
-    raise ValueError("환경변수 TELEGRAM_TOKEN 또는 CHAT_ID가 설정되지 않았습니다.")
+if not BOT_TOKEN or not CHAT_ID:
+    raise ValueError("환경변수 BOT_TOKEN 또는 CHAT_ID가 설정되지 않았습니다.")
 
 # =========================
 # 코인 설정
@@ -38,70 +38,76 @@ COINS = [
 "XTZ","YGG","ZBT","ZETA","ZIL","ZK","ZKC","ZKP","ZORA","ZRO","ZRX"
 ]
 
-EXCLUDE_COINS = {"FLOW","BTT"}
-
-# =========================
-# 텔레그램 전송 함수
-# =========================
-def send_telegram(msg):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+EXCLUDE_COINS = {"FLOW", "BTT"}
+TOP_N = 10  # 상위/하위 표시 개수
 
 # =========================
 # 가격 조회
 # =========================
-def get_prices(coin):
+def get_upbit_price(symbol):
+    try:
+        r = requests.get("https://api.upbit.com/v1/ticker", params={"markets": f"KRW-{symbol}"}, timeout=5).json()
+        return float(r[0]["trade_price"])
+    except:
+        return None
+
+def get_bithumb_price(symbol):
+    try:
+        r = requests.get(f"https://api.bithumb.com/public/ticker/{symbol}_KRW", timeout=5).json()
+        return float(r["data"]["closing_price"])
+    except:
+        return None
+
+# =========================
+# 텔레그램 전송
+# =========================
+def send_telegram(msg):
+    try:
+        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                      data={"chat_id": CHAT_ID, "text": msg}, timeout=10)
+    except Exception as e:
+        print(f"[ERROR] 텔레그램 전송 실패: {e}")
+
+# =========================
+# 코인 비교
+# =========================
+def fetch_coin(coin):
     if coin in EXCLUDE_COINS:
         return None
-    try:
-        up = requests.get("https://api.upbit.com/v1/ticker",
-                          params={"markets": f"KRW-{coin}"}, timeout=5).json()[0]["trade_price"]
-    except:
-        up = None
-    try:
-        bi = float(requests.get(f"https://api.bithumb.com/public/ticker/{coin}_KRW", timeout=5).json()["data"]["closing_price"])
-    except:
-        bi = None
+    up = get_upbit_price(coin)
+    bi = get_bithumb_price(coin)
     if up is None or bi is None:
         return None
-    diff = (up - bi) / bi * 100
+    diff = ((up - bi) / bi) * 100
     return (coin, up, bi, diff)
 
-# =========================
-# 상위 10 정렬 + 메시지 전송
-# =========================
-def compare_top10():
-    upbit_higher = []
-    bithumb_higher = []
-
+def compare_all():
+    results = []
     with ThreadPoolExecutor(max_workers=20) as executor:
-        futures = {executor.submit(get_prices, coin): coin for coin in COINS}
+        futures = {executor.submit(fetch_coin, coin): coin for coin in COINS}
         for f in as_completed(futures):
-            result = f.result()
-            if result is None:
-                continue
-            coin, up, bi, diff = result
-            if diff > 0:
-                upbit_higher.append(result)
-            elif diff < 0:
-                bithumb_higher.append(result)
+            res = f.result()
+            if res:
+                results.append(res)
 
-    upbit_higher.sort(key=lambda x: x[3], reverse=True)
-    bithumb_higher.sort(key=lambda x: x[3])
+    upbit_higher = sorted([r for r in results if r[3] > 0], key=lambda x: x[3], reverse=True)[:TOP_N]
+    bithumb_higher = sorted([r for r in results if r[3] < 0], key=lambda x: x[3])[:TOP_N]
 
-    # 메시지 나누기
     def format_msg(title, data):
-        msg = f"📈 {title}\n"
-        for c, up, bi, diff in data[:10]:
+        msg = f"{title}\n"
+        for c, up, bi, diff in data:
             msg += f"{c}: 업 {up:,} / 빗 {bi:,} / 차이 {diff:.2f}%\n"
         return msg
 
-    send_telegram(format_msg("업비트가 비싼 상위 10코인", upbit_higher))
-    send_telegram(format_msg("빗썸이 비싼 상위 10코인", bithumb_higher))
+    if upbit_higher:
+        send_telegram(format_msg("📈 업비트가 높은 코인 TOP10", upbit_higher))
+    if bithumb_higher:
+        send_telegram(format_msg("📉 빗썸이 높은 코인 TOP10", bithumb_higher))
+
     print("텔레그램 메시지 전송 완료 ✅")
 
 # =========================
 # 실행
 # =========================
 if __name__ == "__main__":
-    compare_top10()
+    compare_all()
