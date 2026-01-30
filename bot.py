@@ -1,9 +1,9 @@
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # =========================
 # 설정
 # =========================
-
 TELEGRAM_TOKEN = "여기에_텔레그램_봇_토큰"
 CHAT_ID = "여기에_채팅_ID"
 
@@ -45,46 +45,47 @@ def send_telegram(msg):
     })
 
 # =========================
-# 가격 조회
+# 가격 조회 (업비트 / 빗썸)
 # =========================
-def get_upbit(symbol):
-    try:
-        r = requests.get("https://api.upbit.com/v1/ticker",
-                         params={"markets": f"KRW-{symbol}"}, timeout=5).json()
-        return r[0]["trade_price"]
-    except:
+def get_prices(coin):
+    if coin in EXCLUDE_COINS:
         return None
 
-def get_bithumb(symbol):
     try:
-        r = requests.get(f"https://api.bithumb.com/public/ticker/{symbol}_KRW", timeout=5).json()
-        return float(r["data"]["closing_price"])
+        up = requests.get("https://api.upbit.com/v1/ticker",
+                          params={"markets": f"KRW-{coin}"}, timeout=5).json()[0]["trade_price"]
     except:
+        up = None
+
+    try:
+        bi = float(requests.get(f"https://api.bithumb.com/public/ticker/{coin}_KRW", timeout=5).json()["data"]["closing_price"])
+    except:
+        bi = None
+
+    if up is None or bi is None:
         return None
 
+    diff = (up - bi) / bi * 100
+    return (coin, up, bi, diff)
+
 # =========================
-# 비교 및 상위 10 추출
+# 메인 비교 및 정렬
 # =========================
 def compare_top10():
     upbit_higher = []
     bithumb_higher = []
 
-    for coin in COINS:
-        if coin in EXCLUDE_COINS:
-            continue
-
-        up = get_upbit(coin)
-        bi = get_bithumb(coin)
-
-        if up is None or bi is None:
-            continue
-
-        diff = (up - bi) / bi * 100
-
-        if diff > 0:
-            upbit_higher.append((coin, up, bi, diff))
-        elif diff < 0:
-            bithumb_higher.append((coin, up, bi, diff))
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        futures = {executor.submit(get_prices, coin): coin for coin in COINS}
+        for f in as_completed(futures):
+            result = f.result()
+            if result is None:
+                continue
+            coin, up, bi, diff = result
+            if diff > 0:
+                upbit_higher.append(result)
+            elif diff < 0:
+                bithumb_higher.append(result)
 
     # 정렬
     upbit_higher.sort(key=lambda x: x[3], reverse=True)
