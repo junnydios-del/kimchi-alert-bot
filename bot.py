@@ -3,12 +3,10 @@ import requests
 # =========================
 # 설정
 # =========================
-TELEGRAM_TOKEN = "너의_텔레그램_봇_토큰"
-CHAT_ID = "너의_채팅_ID"
 
-THRESHOLD = 2.0  # 2%
+TELEGRAM_TOKEN = "여기에_텔레그램_봇_토큰"
+CHAT_ID = "여기에_채팅_ID"
 
-# 업비트 ↔ 빗썸 공통 코인 (232개)
 COINS = [
 "0G","1INCH","2Z","A","AAVE","ADA","AERGO","AERO","AGLD","AHT","AKT","ALGO",
 "ALT","ANIME","ANKR","API3","APT","AQT","ARB","ARDR","ARK","ARKM","ASTR",
@@ -33,11 +31,10 @@ COINS = [
 "XTZ","YGG","ZBT","ZETA","ZIL","ZK","ZKC","ZKP","ZORA","ZRO","ZRX"
 ]
 
-# 제외 코인
-EXCLUDE_COINS = {"FLOW", "BTT"}
+EXCLUDE_COINS = {"FLOW","BTT"}
 
 # =========================
-# 텔레그램
+# 텔레그램 전송
 # =========================
 def send_telegram(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -48,59 +45,65 @@ def send_telegram(msg):
     })
 
 # =========================
-# 가격 조회 (실패 시 None)
+# 가격 조회
 # =========================
 def get_upbit(symbol):
     try:
-        r = requests.get(
-            "https://api.upbit.com/v1/ticker",
-            params={"markets": f"KRW-{symbol}"},
-            timeout=5
-        ).json()
+        r = requests.get("https://api.upbit.com/v1/ticker",
+                         params={"markets": f"KRW-{symbol}"}, timeout=5).json()
         return r[0]["trade_price"]
     except:
         return None
 
 def get_bithumb(symbol):
     try:
-        r = requests.get(
-            f"https://api.bithumb.com/public/ticker/{symbol}_KRW",
-            timeout=5
-        ).json()
+        r = requests.get(f"https://api.bithumb.com/public/ticker/{symbol}_KRW", timeout=5).json()
         return float(r["data"]["closing_price"])
     except:
         return None
 
 # =========================
-# 메인 로직
+# 비교 및 상위 10 추출
 # =========================
-def run():
+def compare_top10():
+    upbit_higher = []
+    bithumb_higher = []
+
     for coin in COINS:
         if coin in EXCLUDE_COINS:
             continue
 
-        upbit = get_upbit(coin)
-        bithumb = get_bithumb(coin)
+        up = get_upbit(coin)
+        bi = get_bithumb(coin)
 
-        # 한쪽이라도 없으면 스킵
-        if upbit is None or bithumb is None:
+        if up is None or bi is None:
             continue
 
-        diff = (upbit - bithumb) / bithumb * 100
+        diff = (up - bi) / bi * 100
 
-        if abs(diff) >= THRESHOLD:
-            high = "업비트 🔺" if diff > 0 else "빗썸 🔺"
+        if diff > 0:
+            upbit_higher.append((coin, up, bi, diff))
+        elif diff < 0:
+            bithumb_higher.append((coin, up, bi, diff))
 
-            msg = (
-                f"🚨 <b>{coin}</b>\n"
-                f"업비트: {upbit:,}원\n"
-                f"빗썸: {bithumb:,}원\n"
-                f"차이: {diff:.2f}%\n"
-                f"비싼 곳: <b>{high}</b>"
-            )
+    # 정렬
+    upbit_higher.sort(key=lambda x: x[3], reverse=True)
+    bithumb_higher.sort(key=lambda x: x[3])
 
-            send_telegram(msg)
+    # 메시지 생성
+    msg = "<b>===== 업비트가 비싼 상위 10코인 =====</b>\n"
+    for c, up, bi, diff in upbit_higher[:10]:
+        msg += f"{c}: 업비트 {up:,}원 / 빗썸 {bi:,}원 / 차이 {diff:.2f}%\n"
+
+    msg += "\n<b>===== 빗썸이 비싼 상위 10코인 =====</b>\n"
+    for c, up, bi, diff in bithumb_higher[:10]:
+        msg += f"{c}: 업비트 {up:,}원 / 빗썸 {bi:,}원 / 차이 {diff:.2f}%\n"
+
+    send_telegram(msg)
+    print("텔레그램 메시지 전송 완료 ✅")
 
 # =========================
+# 실행
+# =========================
 if __name__ == "__main__":
-    run()
+    compare_top10()
